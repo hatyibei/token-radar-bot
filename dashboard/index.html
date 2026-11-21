@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Launch Radar — pre-token protocols ranked by implied launch value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap">
+    <div class="brand">
+      <h1>Token Launch Radar</h1>
+      <p class="tagline">Protocols that record no token yet, ranked by what their launch would be worth if their record stayed as it is — and how to farm each one before it happens.</p>
+    </div>
+    <div class="stats" id="stats"></div>
+  </div>
+</header>
+<main class="wrap">
+  <section class="controls" id="controls" aria-label="Board controls"></section>
+  <section class="board-card">
+    <table class="board" id="board">
+      <thead>
+        <tr>
+          <th data-sort="rank" class="num sortable">#</th>
+          <th data-sort="name" class="sortable">Protocol</th>
+          <th>Category</th>
+          <th>Chains</th>
+          <th data-sort="tvl" class="num sortable">TVL</th>
+          <th data-sort="change" class="num sortable">7d</th>
+          <th data-sort="age" class="num sortable">Age</th>
+          <th data-sort="value" class="num sortable">Implied value</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="empty" id="empty" hidden>No protocol matches this filter. Loosen the search, or clear a filter.</p>
+  </section>
+  <section class="detail" id="detail" hidden></section>
+  <section class="method" id="method"></section>
+  <section class="live" id="live"></section>
+  <footer class="foot" id="foot"></footer>
+</main>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
