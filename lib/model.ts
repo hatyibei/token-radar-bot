@@ -17,11 +17,19 @@
 //   says nothing about what a launch against this TVL would be worth.
 // - growth multiplier: the week's TVL change, clamped to [-40%, +80%], weighted 1.6 and
 //   clamped to [0.45, 2.30]. One hot week must not dominate, but a protocol compounding
-//   at +20% a week is not worth the same as one shrinking at the same rate.
+//   at +20% a week is not worth the same as one shrinking at the same rate. An
+//   unreported change is imputed with the snapshot's median reported change — the same
+//   missing-data policy as age below, so "DefiLlama did not report it" never silently
+//   becomes "nothing happened" for one input and "the typical case" for another.
 // - maturity multiplier: 0.78 for a protocol listed today, rising linearly to 1.25 at
 //   four years of tokenless operation. Surviving years with no token is evidence the
 //   launch, when it comes, prices a real business. An unreported listing date is imputed
 //   with the snapshot's own median age, never with a guess per protocol.
+//
+// Every row also carries the size of the evidence behind its price: ratio_comps is the
+// number of trading protocols whose median priced the row (its category's comp count,
+// or the whole comp set when the category has too few), so a reader can see which
+// values rest on forty observations and which on four.
 //
 // Rows are the protocols that record no token and could plausibly issue one of their own:
 // every watchlist protocol, plus every other no-token protocol except the categories that
@@ -73,6 +81,8 @@ export interface BoardRow {
   age_days: number | null;
   watchlist: boolean;
   ratio_used: number;
+  ratio_comps: number;
+  change_imputed: boolean;
   growth_mult: number;
   maturity_mult: number;
   farm_steps: string[];
@@ -100,13 +110,14 @@ export interface RadarData {
     model_version: string;
     overall_ratio: number;
     median_age_days: number;
+    median_change_7d: number;
     category_ratios: { category: string; comps: number; ratio: number }[];
   };
   rows: BoardRow[];
   live: LiveRow[];
 }
 
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** Categories that are another token in another form, never a launch of their own. */
 const DERIVATIVE_CATEGORIES = new Set(['Canonical Bridge', 'Liquid Restaking', 'Liquid Staking', 'Restaked BTC', 'CEX']);
@@ -139,7 +150,7 @@ function median(values: number[]): number {
 }
 
 /** The comp set: token-bearing protocols whose mcap/TVL ratio can price a launch. */
-function compRatios(snapshot: Snapshot): { overall: number; byCategory: Map<string, { n: number; ratio: number }> } {
+function compRatios(snapshot: Snapshot): { overall: number; total: number; byCategory: Map<string, { n: number; ratio: number }> } {
   const all: number[] = [];
   const perCategory = new Map<string, number[]>();
   for (const p of snapshot.protocols) {
@@ -165,7 +176,7 @@ function compRatios(snapshot: Snapshot): { overall: number; byCategory: Map<stri
       byCategory.set(category, { n, ratio: (n * median(list) + 4 * overall) / (n + 4) });
     }
   }
-  return { overall, byCategory };
+  return { overall, total: all.length, byCategory };
 }
 
 /** True when the protocol records no token in the snapshot. */
@@ -185,25 +196,37 @@ export interface Scored {
   protocol: Protocol;
   age: number | null;
   ratio: number;
+  ratioComps: number;
+  changeImputed: boolean;
   growthMult: number;
   maturityMult: number;
   raw: number;
 }
 
 /** Score one protocol with the model stated at the top of this file. */
-export function scoreProtocol(p: Protocol, asOf: string, overall: number, byCategory: Map<string, { n: number; ratio: number }>, medianAge: number): Scored {
+export function scoreProtocol(p: Protocol, asOf: string, overall: number, totalComps: number, byCategory: Map<string, { n: number; ratio: number }>, medianAge: number, medianChange: number): Scored {
   const age = ageDays(asOf, p.listed_at);
-  const ratio = (p.category !== null ? byCategory.get(p.category)?.ratio : undefined) ?? overall;
-  const growthPct = clamp(p.change_7d ?? 0, -40, 80);
+  const entry = p.category !== null ? byCategory.get(p.category) : undefined;
+  const ratio = entry?.ratio ?? overall;
+  const ratioComps = entry?.n ?? totalComps;
+  const changeImputed = p.change_7d === null;
+  const growthPct = clamp(p.change_7d ?? medianChange, -40, 80);
   const growthMult = clamp(1 + (growthPct / 100) * 1.6, 0.45, 2.3);
   const effectiveAge = age ?? medianAge;
   const maturityMult = 0.78 + 0.47 * (Math.min(effectiveAge, 1460) / 1460);
-  return { protocol: p, age, ratio, growthMult, maturityMult, raw: p.tvl_usd * ratio * growthMult * maturityMult };
+  return { protocol: p, age, ratio, ratioComps, changeImputed, growthMult, maturityMult, raw: p.tvl_usd * ratio * growthMult * maturityMult };
+}
+
+/** The snapshot's median reported 7-day change: the imputation for an unreported one. */
+function medianChangeOf(snapshot: Snapshot): number {
+  const reported = snapshot.protocols.map((p) => p.change_7d).filter((v): v is number => v !== null && Number.isFinite(v));
+  return reported.length > 0 ? median(reported) : 0;
 }
 
 // ---------------------------------------------------------------- farm plans
 //
-// A row's farm plan is assembled from the protocol's own figures: a setup step priced
+// A row's farm plan is assembled from the protocol's own figures: a budget step that
+// states the plan's whole cost and horizon up front, a setup step priced
 // from its main chain's gas, one or two core steps from its category's playbook, a
 // second-chain step when it runs on more than one chain, a weekly cadence step whose
 // length follows its TVL tier, a points step for the categories that run points
@@ -507,6 +530,16 @@ export function farmSteps(p: Protocol, age: number | null): string[] {
     weeks: weeksFor(p.tvl_usd),
   };
   const steps: string[] = [];
+  // The plan opens with its whole budget and horizon, priced from the same tiers and
+  // gas table the steps below use: working capital, the weeks it stays committed, and
+  // the running gas at the plan's own cadence — about two transactions a week on the
+  // main chain, plus one a week on the second chain when the plan opens a position
+  // there too, so the stated total is the plan's real total, not its first chain's.
+  const runningGas = Math.max(1, Math.round(c.weeks * (2 * gasFor(chain) + (p.chains.length > 1 ? gasFor(p.chains[1]!) : 0))));
+  steps.push(fill(pick(p.slug, 'budget', [
+    `Budget and horizon for {name}: about {cap} of working capital committed for {weeks} weeks, plus roughly $${runningGas} of gas at the plan's weekly cadence — size the position so the capital can stay untouched for the whole run, because leaving early is what zeroes most farms.`,
+    `What farming {name} costs, in full: about {cap} of capital held for {weeks} weeks and roughly $${runningGas} of gas across the plan's weekly cadence on every chain it uses; judge the farm on that total, not on the deposit alone.`,
+  ]), c));
   // A protocol whose main chain is Ethereum needs no bridge in: funding is direct.
   const setupOptions = chain === 'Ethereum'
     ? [
@@ -550,12 +583,13 @@ export function farmSteps(p: Protocol, age: number | null): string[] {
 
 /** Build the ranked board: every watchlist protocol plus the other rankable ones. */
 export function buildBoard(snapshot: Snapshot): BoardRow[] {
-  const { overall, byCategory } = compRatios(snapshot);
+  const { overall, total, byCategory } = compRatios(snapshot);
   const ages = snapshot.protocols.map((p) => ageDays(snapshot.as_of, p.listed_at)).filter((a): a is number => a !== null);
   const medianAge = ages.length > 0 ? median(ages) : 365;
+  const medianChange = medianChangeOf(snapshot);
   const watch = new Set(snapshot.watchlist);
   const chosen = snapshot.protocols.filter((p) => recordsNoToken(p) && (watch.has(p.slug) || !isDerivativeCopy(p)));
-  const scored = chosen.map((p) => scoreProtocol(p, snapshot.as_of, overall, byCategory, medianAge));
+  const scored = chosen.map((p) => scoreProtocol(p, snapshot.as_of, overall, total, byCategory, medianAge, medianChange));
   scored.sort((a, b) => b.raw - a.raw || (a.protocol.slug < b.protocol.slug ? -1 : 1));
   const rows: BoardRow[] = [];
   let previous = Number.POSITIVE_INFINITY;
@@ -577,6 +611,8 @@ export function buildBoard(snapshot: Snapshot): BoardRow[] {
       age_days: s.age,
       watchlist: watch.has(s.protocol.slug),
       ratio_used: round4(s.ratio),
+      ratio_comps: s.ratioComps,
+      change_imputed: s.changeImputed,
       growth_mult: round4(s.growthMult),
       maturity_mult: round4(s.maturityMult),
       farm_steps: farmSteps(s.protocol, s.age),
@@ -605,6 +641,7 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
 /** Everything the dashboard needs, in one deterministic object. */
 export function buildRadar(snapshot: Snapshot): RadarData {
   const { overall, byCategory } = compRatios(snapshot);
+  const medianChange = medianChangeOf(snapshot);
   const ages = snapshot.protocols.map((p) => ageDays(snapshot.as_of, p.listed_at)).filter((a): a is number => a !== null);
   const rows = buildBoard(snapshot);
   const live = liveRows(snapshot);
@@ -620,6 +657,7 @@ export function buildRadar(snapshot: Snapshot): RadarData {
       model_version: MODEL_VERSION,
       overall_ratio: round4(overall),
       median_age_days: Math.round(ages.length > 0 ? median(ages) : 365),
+      median_change_7d: round4(medianChange),
       category_ratios: [...byCategory.entries()]
         .map(([category, v]) => ({ category, comps: v.n, ratio: round4(v.ratio) }))
         .sort((a, b) => (a.category < b.category ? -1 : 1)),

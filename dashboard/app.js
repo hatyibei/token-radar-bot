@@ -15,6 +15,7 @@
   var META = DATA.meta, ROWS = DATA.rows, LIVE = DATA.live;
   var bySlug = {};
   ROWS.forEach(function (r) { bySlug[r.slug] = r; });
+  var TOPV = ROWS.length ? ROWS[0].implied_value_usd : 1;
 
   // ------------------------------------------------------------ formatting
   function fmtUsd(n) {
@@ -191,7 +192,11 @@
       var tvl = el('td', 'num', fmtUsd(r.tvl_usd));
       var chg = el('td', 'num ' + (r.change_7d === null ? 'flat' : r.change_7d > 0 ? 'up' : r.change_7d < 0 ? 'down' : 'flat'), fmtPct(r.change_7d));
       var age = el('td', 'num', fmtAge(r.age_days));
-      var val = el('td', 'num value', fmtUsd(r.implied_value_usd));
+      var val = el('td', 'num value');
+      val.appendChild(el('span', null, fmtUsd(r.implied_value_usd)));
+      var vbar = el('div', 'vbar');
+      vbar.style.width = Math.max(3, Math.round(100 * Math.log10(Math.max(10, r.implied_value_usd)) / Math.log10(Math.max(10, TOPV)))) + '%';
+      val.appendChild(vbar);
       tr.append(rank, name, cat, ch, tvl, chg, age, val);
       frag.appendChild(tr);
     });
@@ -229,8 +234,8 @@
     var facts = el('dl', 'facts');
     facts.append(
       fact('TVL (snapshot)', fmtFull(r.tvl_usd)),
-      fact('Category ratio (mcap/TVL)', r.ratio_used.toFixed(4) + '×'),
-      fact('7-day TVL change', fmtPct(r.change_7d)),
+      fact('Category ratio (mcap/TVL)', r.ratio_used.toFixed(4) + '× — median of ' + r.ratio_comps + ' trading comps'),
+      fact('7-day TVL change', r.change_imputed ? 'unreported — snapshot median ' + fmtPct(META.median_change_7d) + ' used' : fmtPct(r.change_7d)),
       fact('Growth multiplier', r.growth_mult.toFixed(4) + '×'),
       fact('Age with no token', r.age_days === null ? 'unreported — median used' : fmtAge(r.age_days) + ' (' + r.age_days + ' days)'),
       fact('Maturity multiplier', r.maturity_mult.toFixed(4) + '×'),
@@ -241,6 +246,27 @@
       facts.append(fact('Rank tie-break', '−$' + (r.implied_raw_usd - r.implied_value_usd).toLocaleString('en-US') + ' so no two ranks tie'));
     }
     left.appendChild(facts);
+    // The value bridge: the model's four stages as bars on one log scale, so a
+    // reader sees which stage does the work — TVL itself, the comp ratio, the
+    // week's growth, or the years with no token — before reading a single figure.
+    var stages = [
+      ['TVL', r.tvl_usd],
+      ['× ratio ' + r.ratio_used.toFixed(3), r.tvl_usd * r.ratio_used],
+      ['× growth ' + r.growth_mult.toFixed(3), r.tvl_usd * r.ratio_used * r.growth_mult],
+      ['× maturity ' + r.maturity_mult.toFixed(3), r.implied_raw_usd],
+    ];
+    var topLog = Math.log10(Math.max.apply(null, stages.map(function (s) { return s[1]; })));
+    var bridge = el('div', 'bridge');
+    bridge.appendChild(el('h4', null, 'How the value builds'));
+    stages.forEach(function (s, i) {
+      var rowEl = el('div', 'bstage');
+      var w = Math.max(5, Math.round(100 * Math.log10(Math.max(10, s[1])) / topLog));
+      var bar = el('div', 'bbar' + (i === stages.length - 1 ? ' last' : ''));
+      bar.style.width = w + '%';
+      rowEl.append(el('span', 'blabel', s[0]), bar, el('span', 'bval', fmtUsd(s[1])));
+      bridge.appendChild(rowEl);
+    });
+    left.appendChild(bridge);
     var right = el('div');
     right.appendChild(el('h3', null, 'How to farm it'));
     var steps = el('ol', 'steps');
@@ -257,7 +283,7 @@
     var h = el('h2', null, 'How the implied value is derived');
     var p1 = el('p');
     p1.innerHTML = 'Every value on this board is <code>TVL × category ratio × growth multiplier × maturity multiplier</code>, computed from the snapshot alone — no protocol is priced by name. The category ratio is the median market-cap/TVL of the snapshot\'s own token-bearing protocols in that category, blended toward the overall median (<b>' + META.overall_ratio.toFixed(4) + '×</b>) with a prior weight of four comps, so a category priced off a handful of tokens cannot dominate the board on noise; a category with fewer than four trading comps uses the overall median outright. The growth multiplier weights the week\'s TVL change at 1.6×, clamped so one hot week cannot dominate; the maturity multiplier rises from 0.78× to 1.25× across four years of operating with no token, because a launch that prices years of real usage is a different claim from one that prices a month of it.';
-    var p2 = el('p', null, 'The board ranks only protocols that record no token and could plausibly issue one of their own: the whole 40-protocol watchlist, plus every other no-token protocol except canonical bridges, liquid staking/restaking wrappers, restaked BTC, exchange house products and wrapped, staked or versioned copies of another product. Protocols whose token already trades are never ranked — they are the comp set below, and their ratios are the model\'s only input. An unreported listing date is imputed with the snapshot\'s median age (' + META.median_age_days + ' days), never guessed per protocol. Where two raw values round to the same dollar, the lower rank is written $1 under its neighbour so the ranking is strict; both numbers are shown in each protocol\'s detail view.');
+    var p2 = el('p', null, 'The board ranks only protocols that record no token and could plausibly issue one of their own: the whole 40-protocol watchlist, plus every other no-token protocol except canonical bridges, liquid staking/restaking wrappers, restaked BTC, exchange house products and wrapped, staked or versioned copies of another product. Protocols whose token already trades are never ranked — they are the comp set below, and their ratios are the model\'s only input. Missing data is imputed one way for every input, never guessed per protocol: an unreported listing date takes the snapshot\'s median age (' + META.median_age_days + ' days), and an unreported 7-day change takes the snapshot\'s median reported change (' + fmtPct(META.median_change_7d) + '); each detail view says where an imputation was used, and how many trading comps priced its row. Where two raw values round to the same dollar, the lower rank is written $1 under its neighbour so the ranking is strict; both numbers are shown in each protocol\'s detail view.');
     m.append(h, p1, p2);
     var ratios = el('div', 'ratios');
     var table = el('table', 'mini');
